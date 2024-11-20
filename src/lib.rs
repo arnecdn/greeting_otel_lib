@@ -9,10 +9,10 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-pub async fn init_otel(oltp_endpoint: &str, pod_name: &str) {
+pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
     let resource = Resource::new(vec![KeyValue::new(
         opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-        pod_name.to_string(),
+        app_name.to_string(),
     ), KeyValue::new(
         opentelemetry_semantic_conventions::resource::K8S_POD_NAME,
         pod_name.to_string()
