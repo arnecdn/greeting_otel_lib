@@ -4,10 +4,10 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::{runtime, Resource};
+use opentelemetry_sdk::{Resource};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::trace::{Config, SdkTracerProvider};
+use opentelemetry_sdk::trace::{ SdkTracerProvider};
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -22,7 +22,7 @@ fn get_resource(resource_name:&str, pod_name:&str) -> Resource {
                     KeyValue::new(
                         opentelemetry_semantic_conventions::resource::K8S_POD_NAME,
                         pod_name.to_string()
-                ))
+                    ))
                 .build()
         })
         .clone()
@@ -98,12 +98,6 @@ pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
         .with_thread_names(true)
         .with_filter(filter_fmt);
 
-    // Initialize the tracing subscriber with the OpenTelemetry layer and the
-    // Fmt layer.
-    tracing_subscriber::registry()
-        .with(otel_layer)
-        .with(fmt_layer)
-        .init();
 
     // At this point Logs (OTel Logs and Fmt Logs) are initialized, which will
     // allow internal-logs from Tracing/Metrics initializer to be captured.
@@ -115,7 +109,17 @@ pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
     // Cloning simply creates a new reference to the same tracer provider. It is
     // important to hold on to the tracer_provider here, so as to invoke
     // shutdown on it when application ends.
-    global::set_tracer_provider(tracer_provider.clone());
+    let otel_trace_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer_provider.tracer(format!("tracer_name: {}",app_name)));
+    // Initialize the tracing subscriber with the OpenTelemetry layer and the
+    // Fmt layer.
+    tracing_subscriber::registry()
+        .with(otel_layer)
+        .with(fmt_layer)
+        .with(otel_trace_layer)
+        .init();
+
+    global::set_tracer_provider(tracer_provider);
 
     global::set_text_map_propagator(TraceContextPropagator::new());
 
