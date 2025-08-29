@@ -1,28 +1,28 @@
-use std::sync::OnceLock;
-use opentelemetry::{global, KeyValue};
 use opentelemetry::trace::TracerProvider;
+use opentelemetry::{global, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::{Resource};
+use opentelemetry_sdk::error::OTelSdkError;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::trace::{ SdkTracerProvider};
-use tracing_subscriber::{EnvFilter, Layer};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
+use std::sync::OnceLock;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
-fn get_resource(resource_name:&str, pod_name:&str) -> Resource {
+fn get_resource(resource_name: &str, pod_name: &str) -> Resource {
     static RESOURCE: OnceLock<Resource> = OnceLock::new();
     RESOURCE
         .get_or_init(|| {
             Resource::builder()
                 .with_service_name(resource_name.to_string())
-                .with_attribute(
-                    KeyValue::new(
-                        opentelemetry_semantic_conventions::resource::K8S_POD_NAME,
-                        pod_name.to_string()
-                    ))
+                .with_attribute(KeyValue::new(
+                    opentelemetry_semantic_conventions::resource::K8S_POD_NAME,
+                    pod_name.to_string(),
+                ))
                 .build()
         })
         .clone()
@@ -66,8 +66,23 @@ fn init_logs(oltp_endpoint: &str, app_name: &str, pod_name: &str) -> SdkLoggerPr
         .build()
 }
 
-pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
-    let logger_provider = init_logs(oltp_endpoint,app_name, pod_name);
+pub struct OtelProviders {
+    tracer_provider: SdkTracerProvider,
+    logger_provider: SdkLoggerProvider,
+    meter_provider: SdkMeterProvider,
+}
+impl OtelProviders {
+    pub async fn shutdown(&self) -> Result<(), OTelSdkError> {
+        self.tracer_provider.shutdown()?;
+        self.meter_provider.shutdown()?;
+        self.logger_provider.shutdown()?;
+        Ok(())
+    }
+}
+
+
+pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) -> OtelProviders {
+    let logger_provider = init_logs(oltp_endpoint, app_name, pod_name);
 
     // Create a new OpenTelemetryTracingBridge using the above LoggerProvider.
     let otel_layer = OpenTelemetryTracingBridge::new(&logger_provider);
@@ -82,27 +97,33 @@ pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
     // Note: This will also drop events from crates like `tonic` etc. even when
     // they are used outside the OTLP Exporter. For more details, see:
     // https://github.com/open-telemetry/opentelemetry-rust/issues/761
-    let filter_otel = EnvFilter::new("info")
-        .add_directive("hyper=off".parse().unwrap())
-        .add_directive("opentelemetry=off".parse().unwrap())
-        .add_directive("tonic=off".parse().unwrap())
-        .add_directive("h2=off".parse().unwrap())
-        .add_directive("reqwest=off".parse().unwrap());
+    let filter_otel = EnvFilter::new("info");
+    // .add_directive("hyper=off".parse().unwrap())
+    // .add_directive("opentelemetry=off".parse().unwrap())
+    // .add_directive("tonic=off".parse().unwrap())
+    // .add_directive("h2=off".parse().unwrap())
+    // .add_directive("reqwest=off".parse().unwrap());
     let otel_layer = otel_layer.with_filter(filter_otel);
 
     // Create a new tracing::Fmt layer to print the logs to stdout. It has a
     // default filter of `info` level and above, and `debug` and above for logs
     // from OpenTelemetry crates. The filter levels can be customized as needed.
-    let filter_fmt = EnvFilter::new("info").add_directive("opentelemetry=debug".parse().unwrap());
+    //
+    let filter_fmt = EnvFilter::new("info")
+        .add_directive("hyper=off".parse().unwrap())
+        .add_directive("opentelemetry=off".parse().unwrap())
+        .add_directive("tonic=off".parse().unwrap())
+        .add_directive("h2=off".parse().unwrap())
+        .add_directive("reqwest=off".parse().unwrap());
+
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_thread_names(true)
         .with_filter(filter_fmt);
 
-
     // At this point Logs (OTel Logs and Fmt Logs) are initialized, which will
     // allow internal-logs from Tracing/Metrics initializer to be captured.
 
-    let tracer_provider = init_traces(oltp_endpoint,app_name, pod_name);
+    let tracer_provider = init_traces(oltp_endpoint, app_name, pod_name);
     // Set the global tracer provider using a clone of the tracer_provider.
     // Setting global tracer provider is required if other parts of the application
     // uses global::tracer() or global::tracer_with_version() to get a tracer.
@@ -110,7 +131,7 @@ pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
     // important to hold on to the tracer_provider here, so as to invoke
     // shutdown on it when application ends.
     let otel_trace_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer_provider.tracer(format!("tracer_name: {}",app_name)));
+        .with_tracer(tracer_provider.tracer(format!("tracer_name: {}", app_name)));
     // Initialize the tracing subscriber with the OpenTelemetry layer and the
     // Fmt layer.
     tracing_subscriber::registry()
@@ -119,12 +140,15 @@ pub async fn init_otel(oltp_endpoint: &str, app_name: &str, pod_name: &str) {
         .with(otel_trace_layer)
         .init();
 
-    global::set_tracer_provider(tracer_provider);
-
+    global::set_tracer_provider(tracer_provider.clone());
     global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // let meter_provider = init_metrics(&app_config.otel_collector.oltp_endpoint).expect("Failed initializing metrics");
-    // global::set_meter_provider(meter_provider);
+    let meter_provider = init_metrics(oltp_endpoint, app_name, pod_name);
+    global::set_meter_provider(meter_provider.clone());
 
+    OtelProviders {
+        tracer_provider,
+        logger_provider,
+        meter_provider,
+    }
 }
-
